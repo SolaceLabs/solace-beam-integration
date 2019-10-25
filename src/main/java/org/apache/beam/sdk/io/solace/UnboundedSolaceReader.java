@@ -17,22 +17,7 @@ import javax.xml.xpath.XPathConstants;
 import javax.xml.xpath.XPathFactory;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.solacesystems.jcsmp.BytesXMLMessage;
-import com.solacesystems.jcsmp.CapabilityType;
-import com.solacesystems.jcsmp.ConsumerFlowProperties;
-import com.solacesystems.jcsmp.EndpointProperties;
-import com.solacesystems.jcsmp.FlowReceiver;
-import com.solacesystems.jcsmp.JCSMPException;
-import com.solacesystems.jcsmp.JCSMPFactory;
-import com.solacesystems.jcsmp.JCSMPFlowTransportException;
-import com.solacesystems.jcsmp.JCSMPProperties;
-import com.solacesystems.jcsmp.JCSMPSession;
-import com.solacesystems.jcsmp.JCSMPStreamingPublishEventHandler;
-import com.solacesystems.jcsmp.Queue;
-import com.solacesystems.jcsmp.Requestor;
-import com.solacesystems.jcsmp.Topic;
-import com.solacesystems.jcsmp.XMLMessageConsumer;
-import com.solacesystems.jcsmp.XMLMessageListener;
+import com.solacesystems.jcsmp.*;
 
 import org.apache.beam.sdk.io.UnboundedSource;
 import org.apache.beam.sdk.io.UnboundedSource.UnboundedReader;
@@ -132,10 +117,10 @@ class UnboundedSolaceReader<T> extends UnboundedSource.UnboundedReader<T> {
 
   @Override
   public boolean start() throws IOException {
-    LOG.info("Starting UnboundSolaceReader for Solace queue: {} ...", source.getQueueName());
+    LOG.info("Starting UnboundSolaceReader for Solace queue: {} ...", source.queue.get());
     SolaceIO.Read<T> spec = source.getSpec();
     try {
-      SolaceIO.ConnectionConfiguration cc = source.getSpec().connectionConfiguration();
+      SolaceIO.ConnectionConfiguration cc = source.getSpec().connectionConfiguration().get();
       final JCSMPProperties properties = new JCSMPProperties();
       properties.setProperty(JCSMPProperties.HOST, cc.getHost()); // host:port
       properties.setProperty(JCSMPProperties.USERNAME, cc.getUsername()); // client-username
@@ -158,11 +143,12 @@ class UnboundedSolaceReader<T> extends UnboundedSource.UnboundedReader<T> {
 
       // do NOT provision the queue, so "Unknown Queue" exception will be threw if the
       // queue is not existed already
-      final Queue queue = JCSMPFactory.onlyInstance().createQueue(source.getQueueName());
+      final Queue queue = JCSMPFactory.onlyInstance().createQueue(source.queue.get());
 
       // Create a Flow be able to bind to and consume messages from the Queue.
       flow_prop.setEndpoint(queue);
       isAutoAck = cc.isAutoAck();
+      isAutoAck = spec.connectionConfiguration().get().isAutoAck();
       if (isAutoAck) {
         // auto ack the messages
         flow_prop.setAckMode(JCSMPProperties.SUPPORTED_MESSAGE_ACK_AUTO);
@@ -180,8 +166,8 @@ class UnboundedSolaceReader<T> extends UnboundedSource.UnboundedReader<T> {
       flowReceiver = session.createFlow(null, flow_prop, endpointProps);
       // Start the consumer
       flowReceiver.start();
-      LOG.info("Binding Solace session [{}] to queue[{}]...", this.clientName, source.getQueueName());
- 
+      LOG.info("Binding Solace session [{}] to queue[{}]...", clientName, source.queue.get());
+
       // Create Monitor Thread
       ActivityMonitor myMonitor = new ActivityMonitor(this, cc.getTimeoutInMillis());
       myMonitor.start();
@@ -204,7 +190,7 @@ class UnboundedSolaceReader<T> extends UnboundedSource.UnboundedReader<T> {
       LOG.info("Stats for Queue [{}] : {} from client [{}]", source.getQueueName(), readerStats.dumpStatsAndClear(true), this.clientName);
       readerStats.setLastReportTime(timeNow);
     }
-    SolaceIO.ConnectionConfiguration cc = source.getSpec().connectionConfiguration();
+    SolaceIO.ConnectionConfiguration cc = source.getSpec().connectionConfiguration().get();
     try {
       BytesXMLMessage msg = flowReceiver.receive(cc.getTimeoutInMillis());
       if (msg == null) {
@@ -264,7 +250,7 @@ class UnboundedSolaceReader<T> extends UnboundedSource.UnboundedReader<T> {
 
   @Override
   public void close() throws IOException {
-    LOG.info("Close the Solace session [{}] on queue[{}]...", clientName, source.getQueueName());
+    LOG.info("Close the Solace session [{}] on queue[{}]...", clientName, source.queue.get());
     active.set(false);
     try {
       if (flowReceiver != null) {
@@ -389,7 +375,7 @@ class UnboundedSolaceReader<T> extends UnboundedSource.UnboundedReader<T> {
   @Override
   public long getSplitBacklogBytes() {
     LOG.debug("Enter getSplitBacklogBytes()");
-    SolaceIO.ConnectionConfiguration cc = source.getSpec().connectionConfiguration();
+    SolaceIO.ConnectionConfiguration cc = source.getSpec().connectionConfiguration().get();
      long backlogBytes = queryQueueBytes(source.getQueueName(), cc.getVpn());
     if (backlogBytes == UnboundedSource.UnboundedReader.BACKLOG_UNKNOWN) {
       LOG.error("getSplitBacklogBytes() unable to read bytes from: {}", source.getQueueName());

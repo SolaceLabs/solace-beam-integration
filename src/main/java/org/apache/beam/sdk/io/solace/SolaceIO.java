@@ -9,6 +9,7 @@ import com.solacesystems.jcsmp.BytesXMLMessage;
 import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
+import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.values.PBegin;
@@ -62,9 +63,6 @@ public class SolaceIO {
     abstract String getHost();
 
     @Nullable
-    abstract List<String> getQueues();
-
-    @Nullable
     abstract String getClientName();
 
     @Nullable
@@ -94,8 +92,6 @@ public class SolaceIO {
     abstract static class Builder {
       abstract Builder setHost(String host);
 
-      abstract Builder setQueues(List<String> queues);
-
       abstract Builder setClientName(String clientName);
 
       abstract Builder setVpn(String vpn);
@@ -120,13 +116,11 @@ public class SolaceIO {
     /**
      * Creates a new Solace connection configuration from provided hostname and queue list.
      */
-    public static ConnectionConfiguration create(String host, List<String> queues) {
+    public static ConnectionConfiguration create(String host) {
       checkArgument(host != null, "host can not be null");
-      checkArgument(queues != null && queues.size() > 0, "queues can not be null or empty");
 
       return new AutoValue_SolaceIO_ConnectionConfiguration.Builder()
           .setHost(host)
-          .setQueues(queues)
           .setAutoAck(false)
           .setSenderTimestamp(false)
           .setSenderMessageId(false)  
@@ -191,7 +185,10 @@ public class SolaceIO {
     private static final long serialVersionUID = 42L;
 
     @Nullable
-    abstract ConnectionConfiguration connectionConfiguration();
+    abstract ValueProvider<ConnectionConfiguration> connectionConfiguration();
+
+    @Nullable
+    abstract List<ValueProvider<String>> queues();
 
     abstract long maxNumRecords();
 
@@ -208,7 +205,9 @@ public class SolaceIO {
 
     @AutoValue.Builder
     abstract static class Builder<T> {
-      abstract Builder<T> setConnectionConfiguration(ConnectionConfiguration config);
+      abstract Builder<T> setConnectionConfiguration(ValueProvider<ConnectionConfiguration> config);
+
+      abstract Builder<T> setQueues(List<ValueProvider<String>> queues);
 
       abstract Builder<T> setMaxNumRecords(long maxNumRecords);
 
@@ -221,11 +220,15 @@ public class SolaceIO {
       abstract Read<T> build();
     }
 
-    public Read<T> withConnectionConfiguration(ConnectionConfiguration configuration) {
+    public Read<T> withConnectionConfiguration(ValueProvider<ConnectionConfiguration> configuration) {
       checkArgument(configuration != null, "configuration can not be null");
       return builder().setConnectionConfiguration(configuration).build();
     }
 
+    public Read<T> withQueues(List<ValueProvider<String>> queues) {
+      checkArgument(queues != null && queues.size()>0, "queues can not be null or empty");
+      return builder().setQueues(queues).build();
+    }
     /**
      * Define the max number of records received by the {@link Read}. When this max
      * number of records is lower than {@code Long.MAX_VALUE}, the {@link Read} will
@@ -275,7 +278,8 @@ public class SolaceIO {
     @Override
     public void populateDisplayData(DisplayData.Builder builder) {
       super.populateDisplayData(builder);
-      connectionConfiguration().populateDisplayData(builder);
+       // cannot do at graph construction time, since we don't have the queues yet
+//     connectionConfiguration().get().populateDisplayData(builder);
       if (maxNumRecords() != Long.MAX_VALUE) {
         builder.add(DisplayData.item("maxNumRecords", maxNumRecords()));
       }

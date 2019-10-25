@@ -23,6 +23,7 @@ import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.options.Default;
 import org.apache.beam.sdk.options.Description;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.windowing.FixedWindows;
 import org.apache.beam.sdk.transforms.windowing.Window;
@@ -138,14 +139,16 @@ public class WindowedWordCountSolace {
         pipeline
             /* Read from the Solace JMS Server. */
             .apply(SolaceIO.readAsString()
-              .withConnectionConfiguration(SolaceIO.ConnectionConfiguration.create(
-                  options.getCip(), queues)
+              .withConnectionConfiguration(
+                      ValueProvider.StaticValueProvider.of(
+                              SolaceIO.ConnectionConfiguration.create(
+                  options.getCip())
               .withUsername(options.getCu())
               .withPassword(options.getCp())
               .withAutoAck(options.getAuto())
               .withSenderTimestamp(options.getSts())
               .withSenderMessageId(options.getSmi())
-              .withTimeout(options.getTimeout()))
+              .withTimeout(options.getTimeout())))
           );
 
     /*

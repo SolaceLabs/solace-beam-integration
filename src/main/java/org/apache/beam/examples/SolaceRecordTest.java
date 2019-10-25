@@ -27,6 +27,7 @@ import org.apache.beam.sdk.io.solace.SolaceTextRecord;
 import org.apache.beam.sdk.options.Default;
 import org.apache.beam.sdk.options.Description;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.ParDo;
@@ -143,13 +144,15 @@ public class SolaceRecordTest {
     PCollection<SolaceTextRecord> input =
         pipeline
           .apply(SolaceIO.<SolaceTextRecord>readMessage()
-            .withConnectionConfiguration(SolaceIO.ConnectionConfiguration.create(options.getCip(), queues)
+            .withConnectionConfiguration(
+                    ValueProvider.StaticValueProvider.of(
+                            SolaceIO.ConnectionConfiguration.create(options.getCip())
             .withUsername(options.getCu())
             .withPassword(options.getCp())
             .withAutoAck(options.getAuto())
             .withSenderTimestamp(options.getSts())
             .withSenderMessageId(options.getSmi())
-            .withTimeout(options.getTimeout()))
+            .withTimeout(options.getTimeout())))
             .withCoder(SolaceTextRecord.getCoder())
             .withMessageMapper(SolaceTextRecord.getMapper())
           );

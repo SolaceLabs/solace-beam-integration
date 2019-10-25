@@ -6,6 +6,7 @@ import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.SerializableCoder;
 import org.apache.beam.sdk.io.UnboundedSource;
 import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.display.DisplayData;
 
 import org.slf4j.Logger;
@@ -21,14 +22,14 @@ class UnboundedSolaceSource<T> extends UnboundedSource<T, SolaceCheckpointMark> 
   private static final long serialVersionUID = 42L;
   private static final Logger LOG = LoggerFactory.getLogger(UnboundedSolaceSource.class);
   private final SolaceIO.Read<T> spec;
-  private String queueName;
+  ValueProvider<String> queue;
   
   public SolaceIO.Read<T> getSpec() { 
     return spec;
   }
 
   public String getQueueName() {
-    return queueName;
+    return queue.get();
   }
 
 
@@ -48,14 +49,12 @@ class UnboundedSolaceSource<T> extends UnboundedSource<T, SolaceCheckpointMark> 
 
   @Override
   public List<UnboundedSolaceSource<T>> split(int desiredNumSplits, PipelineOptions options) {
-    SolaceIO.ConnectionConfiguration cc = spec.connectionConfiguration();
-    LOG.debug("Queue Numbers: {}, desiredNumSplits: {}, PipelineOptions: {}",
-        cc.getQueues().size(), desiredNumSplits, options);
+    LOG.debug("desiredNumSplits: {}, PipelineOptions: {}", desiredNumSplits, options);
 
     List<UnboundedSolaceSource<T>> sourceList = new ArrayList<>();
-    for (String queueName : cc.getQueues()) {
+    for (ValueProvider<String> queueName : spec.queues()) {
       UnboundedSolaceSource<T> source = new UnboundedSolaceSource<T>(spec);
-      source.queueName = queueName;
+      source.queue = queueName;
       sourceList.add(source);
     }
     return sourceList;
