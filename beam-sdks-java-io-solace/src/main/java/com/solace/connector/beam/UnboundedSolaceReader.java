@@ -16,6 +16,7 @@ import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.LinkedList;
@@ -39,6 +40,7 @@ class UnboundedSolaceReader<T> extends UnboundedSource.UnboundedReader<T> {
 
 	private final UnboundedSolaceSource<T> source;
 	private JCSMPSession session;
+	@Nullable
 	protected FlowReceiver flowReceiver;
 	private MsgBusSempUtil msgBusSempUtil;
 	private boolean useSenderTimestamp;
@@ -80,7 +82,9 @@ class UnboundedSolaceReader<T> extends UnboundedSource.UnboundedReader<T> {
 					reader.readerStats.incrementMonitorChecks();
 					Thread.sleep(timeout * debounce);
 					if (!reader.isActive.get()) {
-						reader.flowReceiver.close();
+						if (reader.flowReceiver != null) {
+							reader.flowReceiver.close();
+						}
 						reader.readerStats.incrementMonitorFlowClose();
 					}
 					reader.isActive.set(false);
@@ -97,6 +101,22 @@ class UnboundedSolaceReader<T> extends UnboundedSource.UnboundedReader<T> {
 		this.current = null;
 		watermark.getAndSet(System.currentTimeMillis());
 		this.readerStats = new SolaceReaderStats();
+	}
+
+	private boolean prepareFlow() throws IOException {
+		if (flowReceiver == null) {
+			try {
+				// bind to the queue, passing null as message listener for no async callback
+				flowReceiver = session.createFlow(null, flow_prop, endpointProps);
+				// Start the consumer
+				flowReceiver.start();
+				LOG.info("Binding Solace session [{}] to queue[{}]...", this.clientName, source.getQueueName());
+			} catch (JCSMPException ex) {
+				LOG.error(String.format("JCSMPException from client [%s] : %s", this.clientName, ex.getMessage()), ex);
+				throw new IOException(ex);
+			}
+		}
+		return true;
 	}
 
 	@Override
@@ -125,11 +145,7 @@ class UnboundedSolaceReader<T> extends UnboundedSource.UnboundedReader<T> {
 
 			readerStats.setLastReportTime(Instant.now());
 
-			// bind to the queue, passing null as message listener for no async callback
-			flowReceiver = session.createFlow(null, flow_prop, endpointProps);
-			// Start the consumer
-			flowReceiver.start();
-			LOG.info("Binding Solace session [{}] to queue[{}]...", this.clientName, source.getQueueName());
+			prepareFlow();
 
 			// Create Monitor Thread
 			ActivityMonitor<T> myMonitor = new ActivityMonitor<>(this, source.getSpec().advanceTimeoutInMillis());
@@ -146,6 +162,8 @@ class UnboundedSolaceReader<T> extends UnboundedSource.UnboundedReader<T> {
 
 	@Override
 	public boolean advance() throws IOException {
+		prepareFlow();
+
 		LOG.debug("Advancing Solace session [{}] on queue [{}]...", this.clientName, source.getQueueName());
 		Instant timeNow = Instant.now();
 		this.isActive.set(true);
@@ -180,7 +198,7 @@ class UnboundedSolaceReader<T> extends UnboundedSource.UnboundedReader<T> {
 			wait4cpQueue.add(new Message(msg, currentTimestamp));
 		} catch (JCSMPException ex) {
 			try {
-				LOG.info("JCSMPException for from client [{}] : {}", this.clientName, ex.getMessage());
+				LOG.info("JCSMPException from client [{}] : {}", this.clientName, ex.getMessage());
 				flowReceiver.close();
 				flowReceiver = session.createFlow(null, flow_prop, endpointProps);
 				flowReceiver.start();
@@ -257,7 +275,11 @@ class UnboundedSolaceReader<T> extends UnboundedSource.UnboundedReader<T> {
 		}
 		readerStats.setCurrentCheckpointTime(Instant.now());
 		readerStats.incrCheckpointReadyMessages((long) ackQueue.size());
-		return new SolaceCheckpointMark(this, clientName, ackQueue);
+
+		// pass off flowReceiver to the created CheckpointMark and set it to null
+		SolaceCheckpointMark mark = new SolaceCheckpointMark(this, flowReceiver, clientName, ackQueue);
+		flowReceiver = null;
+		return mark;
 	}
 
 	@Override
@@ -282,20 +304,36 @@ class UnboundedSolaceReader<T> extends UnboundedSource.UnboundedReader<T> {
 	}
 
 	private long queryQueueBytes(String queueName, String vpnName) {
-		LOG.debug("Enter queryQueueBytes() Queue: [{}] VPN: [{}]", queueName, vpnName);
+		LOG.info("Enter queryQueueBytes() Queue: [{}] VPN: [{}]", queueName, vpnName);
 		long queueBytes = UnboundedSource.UnboundedReader.BACKLOG_UNKNOWN;
 		String sempShowQueue = String.format("<rpc><show><queue><name>%s</name><vpn-name>%s</vpn-name></queue></show></rpc>",
 				queueName, vpnName);
-		String queryString = "/rpc-reply/rpc/show/queue/queues/queue/info/current-spool-usage-in-bytes";
+		String queryString = "/rpc-reply/rpc/show/queue/queues/queue/info/num-messages-spooled";
+
+		// start the reader if it isn't started (this is an issue with the Beam SDK 2.25+ because the getSplitBacklogBytes caller creates but doesn't start the reader)
+		boolean startSession = (msgBusSempUtil == null);
 		try {
+			if (startSession) { start(); }
 			String queryResults = msgBusSempUtil.queryRouter(sempShowQueue, queryString);
 			queueBytes = Long.parseLong(queryResults);
 		} catch (JCSMPException e) {
-			LOG.error(String.format("Encountered a JCSMPException querying queue depth: %s", e.getMessage()), e);
+			// downgraded from error because the worker still returns a valid value -- unknown amount of data left
+			// mainly affects the scaling responsiveness of the pipeline in Dataflow and requires a large number of messages remaining consistently before scaling would be triggered
+			// it instead distracts from other errors because once this triggers (e.g. due to having more clients that expected), it will keep popping up
+			LOG.warn(String.format("Encountered a JCSMPException querying queue depth: %s", e.getMessage()), e);
 			return UnboundedSource.UnboundedReader.BACKLOG_UNKNOWN;
 		} catch (Exception e) {
-			LOG.error(String.format("Encountered a Parser Exception querying queue depth: %s", e.toString()), e);
+			// see above
+			LOG.warn(String.format("Encountered a Parser Exception querying queue depth: %s", e.toString()), e);
 			return UnboundedSource.UnboundedReader.BACKLOG_UNKNOWN;
+		} finally {
+			try {
+				// if the session was started as a result of this function, close it to avoid leaking consumers
+				if (startSession) { close(); }
+			}
+			catch (Exception e) {
+				LOG.error("Failed to close started session.", e);
+			}
 		}
 		return queueBytes;
 	}
@@ -306,7 +344,7 @@ class UnboundedSolaceReader<T> extends UnboundedSource.UnboundedReader<T> {
 		long backlogBytes = queryQueueBytes(source.getQueueName(),
 				source.getSpec().jcsmpProperties().getStringProperty(JCSMPProperties.VPN_NAME));
 		if (backlogBytes == UnboundedSource.UnboundedReader.BACKLOG_UNKNOWN) {
-			LOG.error("getSplitBacklogBytes() unable to read bytes from: {}", source.getQueueName());
+			LOG.warn("getSplitBacklogBytes() unable to read bytes from: {}", source.getQueueName());
 			return UnboundedSource.UnboundedReader.BACKLOG_UNKNOWN;
 		}
 		readerStats.setCurrentBacklog(backlogBytes);
@@ -319,6 +357,7 @@ class UnboundedSolaceReader<T> extends UnboundedSource.UnboundedReader<T> {
 	protected void finalize() throws Throwable {
 		this.endMonitor.set(true);
 		if (session != null && !session.isClosed()) {
+			LOG.info("Finalizing Solace session [{}] on queue [{}]...", clientName, source.getQueueName());
 			session.closeSession();
 		}
 	}
